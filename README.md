@@ -9,9 +9,9 @@ Here are the steps I have taken to accomplish this:
 
 2. Merge play-by-play data and player data with tracking data so we can have a new large dataset, with each row representing a given player's movement for a particular play.
 
-3. Manipulate existing variables to create new ones for modeling purposes (ex. calculating a score differential variable and making in a factor), may want to create more variables
+3. Manipulate existing variables to create new ones for modeling purposes (ex. calculating a score differential variable and making it into a factor), may want to create more variables.
 
-4. Acquire salary data for each player from Spotrac.com, and use it as a response variable to see how the metric I create correlates to a tangible OL metric. (have first 100 players, working on scraping the rest)
+4. Acquire salary data for each player from Spotrac.com, and use it as a response variable to see how the metric I create correlates to a tangible OL metric.
 
 5. Create a model using old and new variables to come up with a salary prediction for each player. Use appropriate weights for each of the variables, and aggregate these variables over all plays that a given player participates in.
 
