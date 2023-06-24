@@ -1,6 +1,8 @@
 # UCLA-MAS-Thesis
 Thesis on Analyzing Offensive Line Play with Tracking Data
 
+Full thesis can be found here: https://www.proquest.com/docview/2828117780
+
 This thesis is going to evaluate offensive line play that will emphasize an offensive lineman's physical dominance, measured through speed, agility, power, and other variables.
 
 Here are the steps I have taken to accomplish this:
