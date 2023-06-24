@@ -1,0 +1,1138 @@
+---
+title: "MAS Thesis 2023"
+author: "Alex Veroulis"
+date: "2022-12-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Data Processing
+
+```{r Loading data from Kaggle}
+library(dplyr)
+setwd("~/Desktop/nfl-big-data-bowl-thesis")
+
+# code for loading data
+
+# Game-level info Weeks 1-8 of the 2021 NFL Season; *key var = gameId*
+games <- read.csv("games.csv")
+
+# Individual play data; *key vars = gameId, playId*, taking out all scrambles
+plays <- read.csv("plays.csv") %>% filter(passResult != "R")
+
+# Player-level info; *key var = nflId*
+players <- read.csv("players.csv")
+
+# PFF Scouting Data; *key vars = gameId, playId, nflId*
+pff <- read.csv("pffScoutingData.csv")
+
+# Week-by-Week Play Tracking data; *key vars = gameId, playId, nflId*
+week1 <- read.csv("week1.csv")
+week2 <- read.csv("week2.csv")
+week3 <- read.csv("week3.csv")
+week4 <- read.csv("week4.csv")
+week5 <- read.csv("week5.csv")
+week6 <- read.csv("week6.csv")
+week7 <- read.csv("week7.csv")
+week8 <- read.csv("week8.csv")
+
+```
+
+```{r Merging and Cleaning Data}
+library(dplyr)
+library(lubridate)
+library(stringr)
+
+# games, plays, and players data sets stay the same
+# merging games and plays
+full_plays <- left_join(plays,games,by="gameId")
+
+# adding absolute yardline for an NA
+full_plays[full_plays$gameId == 2021091904 & full_plays$playId == 3676, "absoluteYardlineNumber"] <- 71
+
+# looking at how positions are distributed
+summary(as.factor(players$officialPosition))
+
+# for players' general position: offensive linemen are marked as OL, secondary marked as DSEC , QB marked as QB, other offensive positions marked as O, other defensive positions marked as D
+players$general <- character(length=nrow(players))
+
+for(i in 1:nrow(players)){
+  if(players$officialPosition[i] %in% c("C","G","T")){
+    players$general[i] <- "OL"
+  } else if(players$officialPosition[i] == "QB"){
+    players$general[i] <- "QB"
+  } else if(players$officialPosition[i] %in% c("FB","RB","TE","WR")){
+    players$general[i] <- "O"
+  } else if(players$officialPosition[i] %in% c("CB","DB","FS","SS")){
+    players$general[i] <- "DSEC"
+  } else{
+    players$general[i] <- "D"
+  }
+}
+
+# merge pff dataset with full_plays dataset
+pff_plays <- left_join(full_plays,pff,by=c("gameId","playId"))
+
+# merge pff_plays dataset with tracking data from each week for each player
+pffw1 <- inner_join(pff_plays,week1,by=c("gameId","playId","nflId"))
+pffw2 <- inner_join(pff_plays,week2,by=c("gameId","playId","nflId"))
+pffw3 <- inner_join(pff_plays,week3,by=c("gameId","playId","nflId"))
+pffw4 <- inner_join(pff_plays,week4,by=c("gameId","playId","nflId"))
+pffw5 <- inner_join(pff_plays,week5,by=c("gameId","playId","nflId"))
+pffw6 <- inner_join(pff_plays,week6,by=c("gameId","playId","nflId"))
+pffw7 <- inner_join(pff_plays,week7,by=c("gameId","playId","nflId"))
+pffw8 <- inner_join(pff_plays,week8,by=c("gameId","playId","nflId"))
+
+# combine tracking/pff data from each week into one dataset
+pffweeks <- rbind(pffw1,pffw2,pffw3,pffw4,pffw5,pffw6,pffw7,pffw8)
+```
+
+```{r Editing pffweeks_full Data}
+library(dplyr)
+library(tidyr)
+# merge player info with pffweeks data
+pffweeks_full <- left_join(pffweeks,players,by="nflId")
+
+summary(pffweeks_full)
+
+
+# calculating a score differential variable from the perspective of each player
+pffweeks_full <- pffweeks_full %>% mutate(scorediff =
+  case_when(
+    team == homeTeamAbbr ~ preSnapHomeScore - preSnapVisitorScore,
+    team == visitorTeamAbbr ~ preSnapVisitorScore - preSnapHomeScore
+  )
+)
+
+# making a binary categorical variable saying whether a game is within 7 points or not
+pffweeks_full <- pffweeks_full %>% mutate(score_cats = 
+  case_when(
+    abs(scorediff) <= 7 ~ "1 score",
+    abs(scorediff) > 7 ~ "2+ scores"
+  )
+)
+
+# dividing quarters into halves
+pffweeks_full <- pffweeks_full %>% mutate(half =
+  case_when(
+    quarter > 2 ~ 2,
+    quarter <= 2 ~ 1
+  )
+)
+
+# first removing plays where an "absoluteYardlineNumber" isn't present, then calculating a "distance to score" metric that finds how many yards a team has to go to score; first getting distance number and then binning it into red zone (RZ) or not
+
+pffweeks_full <- pffweeks_full %>% drop_na(absoluteYardlineNumber) %>% mutate(dist_to_score =
+  case_when(
+    playDirection == "right" ~ 110 - absoluteYardlineNumber,
+    playDirection == "left" ~ absoluteYardlineNumber - 10
+  )
+) %>% mutate(dist_to_score = 
+               case_when(
+                 dist_to_score > 20 ~ "Non-RZ",
+                 dist_to_score <= 20 ~ "RZ"
+               )
+             )
+
+
+# replacing NA values with 0 for several key variables
+pffweeks_full <- pffweeks_full %>% replace_na(list(pff_beatenByDefender=0,pff_hitAllowed=0,pff_hurryAllowed=0,pff_sackAllowed=0,pff_nflIdBlockedPlayer=0,foulNFLId1=0,foulNFLId2=0))
+
+
+# can exclude foulNFLId3 because only one play had 3 penalties, and the third was on Taron Johnson, a CB
+# only including players with roles of pass, (only for tracking), pass rush (only for tracking) and pass block (for the OL)
+
+pffweeks_full <- pffweeks_full %>% dplyr::select(gameId,playId,playDescription,week,half,nflId,displayName,general,pff_role,pff_beatenByDefender,pff_hitAllowed,pff_hurryAllowed,pff_sackAllowed,pff_nflIdBlockedPlayer,frameId,x,y,s,a,dis,o,event,score_cats,dist_to_score,foulNFLId1,foulNFLId2) %>% filter(pff_role != "Pass Route")
+
+
+```
+
+
+Algorithm / Response Data
+
+```{r Sample Play Algorithm}
+
+# 1-play example for how algorithm will work
+
+# play id's from original plays dataset
+playlist <- plays %>% dplyr::select(gameId,playId)
+
+# play id's from pffweeks_full dataset; the same as playlist
+pff_playlist <- pffweeks_full %>% dplyr::select(gameId,playId) %>% distinct()
+
+# filter by a single play
+pffsample <- pffweeks_full %>% filter(gameId == 2021090900,playId == 97)
+
+
+# storing nflid's of all offensive linemen; will store play-by-play data for each lineman
+ol_ids <- players %>% filter(general == "OL") %>% dplyr::select(nflId,displayName)
+
+# find OL that qualify as blockers on play
+active_ol_ids <- pffsample %>% filter(general == "OL",pff_nflIdBlockedPlayer > 0) %>% distinct(nflId,displayName)
+
+active_ol <- data.frame(nflId = integer(40540),displayName = character(40540),gameId = integer(40540),playId = integer(40540),dist_to_score = numeric(40540),half = numeric(40540), score_cats = character(40540),pff_beatenByDefender = integer(40540),pff_hitAllowed = integer(40540),pff_hurryAllowed = integer(40540),pff_sackAllowed = integer(40540),penalty = numeric(40540),o_median = numeric(40540), o_mean = numeric(40540),omax = numeric(40540),max_acc = numeric(40540),med_acc = numeric(40540),mean_acc = numeric(40540),max_spd = numeric(40540),med_spd = numeric(40540),mean_spd = numeric(40540),back_dist_max = numeric(40540),ol_tot_dist = numeric(40540),ol_med_dist = numeric(40540),ol_mean_dist = numeric(40540),op_ol_max = numeric(40540),op_ol_med = numeric(40540),op_ol_mean = numeric(40540),op_ol_xmax = numeric(40540),op_ol_xmin = numeric(40540),op_ol_xmed = numeric(40540),op_ol_xmean = numeric(40540),def_qb_min = numeric(40540),def_qb_max = numeric(40540),def_qb_med = numeric(40540),def_qb_mean = numeric(40540),def_qb_closemx = numeric(40540),ol_qb_min = numeric(40540),ol_qb_max = numeric(40540),ol_qb_med = numeric(40540),ol_qb_mean = numeric(40540))
+
+
+############################# ALGORITHM THAT ITERATES BY nflId within the play: i (main), j, k, ol, t, m, pl, qb
+
+for(i in 1:nrow(active_ol_ids)){
+  
+  # STEP 1: LOGISTICS ABOUT THE PLAYER AND GAME
+  # having a dataset of only the given O-lineman
+  playerdata <- pffsample %>% filter(nflId == active_ol_ids$nflId[i])
+  
+  if(nrow(active_ol_ids) == 0){
+    next
+  }
+  
+  # sanity check to make sure there is data for the blocked player; if not, we skip the given O-lineman and move on to the next
+  opp_player <- pffsample %>% filter(nflId == playerdata$pff_nflIdBlockedPlayer)
+  
+  # identifying info about game, play, and player
+  active_ol$nflId[i] <- playerdata$nflId[1]
+  active_ol$displayName[i] <- playerdata$displayName[1]
+  active_ol$gameId[i] <- playerdata$gameId[1]
+  active_ol$playId[i] <- playerdata$playId[1]
+  
+  ### creating several metrics based on existing data
+  
+  #########################################################################
+  ## STEP 2: Weighting Variables, to do with game situation
+  
+  # distance to end zone
+  active_ol$dist_to_score[i] <- playerdata$dist_to_score[1]
+  # half 1 or 2
+  active_ol$half[i] <- playerdata$half[1]
+  # one-score game or not
+  active_ol$score_cats[i] <- playerdata$score_cats[1]
+  # whether defender got by OL or not
+  active_ol$pff_beatenByDefender[i] <- playerdata$pff_beatenByDefender[1]
+  # whether hit was allowed
+  active_ol$pff_hitAllowed[i] <- playerdata$pff_hitAllowed[1]
+  # whether hurry was allowed
+  active_ol$pff_hurryAllowed[i] <- playerdata$pff_hurryAllowed[1]
+  # whether sack was allowed
+  active_ol$pff_sackAllowed[i] <- playerdata$pff_sackAllowed[1]
+  # binary penalty variable
+  active_ol$penalty[i] <- case_when(
+    playerdata$nflId[1] == playerdata$foulNFLId1[1] | playerdata$nflId[1] == playerdata$foulNFLId2[1] ~ 1,
+    playerdata$nflId[1] != playerdata$foulNFLId1[1] & playerdata$nflId[1] != playerdata$foulNFLId2[1] ~ 0
+  )
+  
+  #########################################################################
+  ## STEP 3: tracking / movement variables
+  
+  
+  ######### 3A. FOR THE OL HIMSELF
+  
+  
+  ####### OL ORIENTATION CHANGES
+  o_chgs <- numeric(nrow(playerdata)-1)
+  for(j in 2:nrow(playerdata)){
+    o_chgs[j-1] <- abs(playerdata$o[j] - playerdata$o[j-1])
+  }
+  
+  active_ol$o_median[i] <- median(o_chgs) # median change in orientation throughout a given play
+  active_ol$o_mean[i] <- mean(o_chgs) # mean change in orientation throughout a given play
+  active_ol$omax[i] <- max(o_chgs) # maximum change in orientation during a given play
+  
+  
+  ####### OL ACCELERATION STATS
+  
+  acc_stats <- playerdata$a
+  active_ol$max_acc[i] <- max(acc_stats) # max acceleration
+  active_ol$med_acc[i] <- median(acc_stats) # median acceleration
+  active_ol$mean_acc[i] <- mean(acc_stats) # mean acceleration
+  
+  ######## OL SPEED STATS
+  spd_stats <- playerdata$s
+  active_ol$max_spd[i] <- max(spd_stats) # max speed
+  active_ol$med_spd[i] <- median(spd_stats) # median speed
+  active_ol$mean_spd[i] <- mean(spd_stats) # mean speed
+  
+  # keeping track of how far O-lineman traveled backward
+  ol_back <- numeric(nrow(playerdata)-1)
+  
+  for(t in 2:nrow(playerdata)){
+    ol_back[t-1] <- abs(playerdata$x[1] - playerdata$x[t])
+  }
+  
+  # distance traveled backwards by O-lineman
+  active_ol$back_dist_max[i] <- max(ol_back) # max distance traveled backwards
+  
+  ############# Finding the distances traveled each frame for the offensive lineman, taking out non-zero entries
+  dist_trav <- numeric(nrow(playerdata))
+  
+  for(m in 1:(nrow(playerdata) - 1)){
+    dist_trav[m] <- sqrt( (playerdata$x[m+1] - playerdata$x[m])^2 + (playerdata$y[m+1] - playerdata$y[m])^2 )
+  }
+  
+  dist_trav <- dist_trav[dist_trav != 0]
+  
+  active_ol$ol_tot_dist[i] <- sum(dist_trav) # total distance traveled by offensive lineman during play
+  active_ol$ol_med_dist[i] <- median(dist_trav) # median distance traveled by offensive lineman during play
+  active_ol$ol_mean_dist[i] <- mean(dist_trav) # mean distance traveled by offensive lineman during play
+  
+  
+  ############################# PROXIMITIES BETWEEN PLAYERS
+  
+  
+  ################ 3B. CREATING A DATASET OF TRACKING COORDINATES FOR THE DEFENSIVE PLAYER BEING BLOCKED
+  opp_player <- pffsample %>% filter(nflId == playerdata$pff_nflIdBlockedPlayer)
+  
+  # finding distances between Defender and Offensive lineman
+  opp_ol_dist <- numeric(nrow(playerdata)) # overall distance between players
+  opp_ol_xdist <- numeric(nrow(playerdata)) # x-coord dist between players
+  
+  for(ol in 1:nrow(playerdata)){
+    opp_ol_dist[ol] <- sqrt( (opp_player$x[ol] - playerdata$x[ol])^2 + (opp_player$y[ol] - playerdata$y[ol])^2 )
+    
+    if(opp_player$x[1] > playerdata$x[1]){
+      opp_ol_xdist[ol] <- opp_player$x[ol] - playerdata$x[ol]
+    } else{
+      opp_ol_xdist[ol] <- playerdata$x[ol] - opp_player$x[ol]
+    }
+  }
+  
+  ####### DISTANCES BETWEEN DEFENDER AND OL
+  active_ol$op_ol_max[i] <- max(opp_ol_dist) # maximum distance
+  active_ol$op_ol_med[i] <- median(opp_ol_dist) # median distance
+  active_ol$op_ol_mean[i] <- mean(opp_ol_dist) # mean distance
+  
+  # x-distances (up-field distances)
+  active_ol$op_ol_xmax[i] <- max(opp_ol_xdist) # maximum distance
+  active_ol$op_ol_xmin[i] <- min(opp_ol_xdist) # minimum distance
+  active_ol$op_ol_xmed[i] <- median(opp_ol_xdist) # median distance
+  active_ol$op_ol_xmean[i] <- mean(opp_ol_xdist) # mean distance
+  
+  
+  
+  ################## 3C. CREATING A DATASET OF TRACKING COORDINATES FOR THE QUARTERBACK, PROXIMITY TO DEFENDER
+  qb_data <- pffsample %>% filter(pff_role == "Pass")
+  
+  # finding distances between Defender and QB
+  def_qb_dist <- numeric(nrow(playerdata))
+  
+  for(k in 1:nrow(playerdata)){
+    def_qb_dist[k] <- sqrt( (opp_player$x[k] - qb_data$x[k])^2 + (opp_player$y[k] - qb_data$y[k])^2 )
+  }
+  
+  # distances from Defender to QB
+  active_ol$def_qb_min[i] <- min(def_qb_dist) # minimum distance
+  active_ol$def_qb_max[i] <- max(def_qb_dist) # max distance
+  active_ol$def_qb_med[i] <- median(def_qb_dist) # median distance
+  active_ol$def_qb_mean[i] <- mean(def_qb_dist) # mean distance
+
+  
+  # finding "distance closed" by defender on path to QB
+  def_qb_close <- numeric(nrow(playerdata)-1)
+    
+  for(pl in 2:nrow(playerdata)){
+    def_qb_close[pl-1] <- (def_qb_dist[1] - def_qb_dist[pl]) / def_qb_dist[1]
+  }
+  
+  # "distance closed" by defender as a proportion of initial distance
+  active_ol$def_qb_closemx[i] <- max(def_qb_close) # maximum distance closed
+  
+  ################## 3D. DISTANCE BETWEEN THE QUARTERBACK AND OL
+  
+  ol_qb_dist <- numeric(nrow(playerdata))
+  
+  for(qb in 1:nrow(playerdata)){
+    ol_qb_dist[qb] <- sqrt( (playerdata$x[qb] - qb_data$x[qb])^2 + (playerdata$y[qb] - qb_data$y[qb])^2 )
+  }
+
+
+  # distances from QB to OL
+  active_ol$ol_qb_min[i] <- min(ol_qb_dist) # minimum distance
+  active_ol$ol_qb_max[i] <- max(ol_qb_dist) # max distance
+  active_ol$ol_qb_med[i] <- median(ol_qb_dist) # median distance
+  active_ol$ol_qb_mean[i] <- mean(ol_qb_dist) # mean distance
+  
+}
+
+
+truedf <- active_ol %>% filter(nflId > 0)
+
+```
+
+```{r Getting Salary Data for 2021 Season}
+library(rvest)
+library(stringr)
+library(data.table)
+library(xml2)
+
+# SO FAR ONLY GETTING FIRST 100 NAMES************
+
+sal_url <- read_html("https://www.spotrac.com/nfl/rankings/2021/offensive-line/cash/")
+
+# table of 2021 OL salaries
+
+saltable <- sal_url %>% html_element("table") %>% html_table(header=TRUE) %>% dplyr::select(Player,cash)
+
+
+
+# getting full player names
+salnames <- sal_url %>% html_elements(".team-name") %>% html_text2()
+str(salnames)
+
+# inputting names into initial table
+saltable$Player <- salnames
+
+# taking out dollar signs and commas from cash amounts
+saltable$cash <- gsub("\\$", "", saltable$cash)
+saltable$cash <- gsub(",", "", saltable$cash)
+
+saltable$cash <- as.numeric(saltable$cash)
+
+names(saltable)[1] <- "displayName"
+
+# adding the other players we have salary data for; no D'ante Smith (194)
+others <- data.frame(
+  displayName = c("Alex Lewis","Sam Tevi","Aaron Banks","Mike McGlinchey","Trai Turner","Ereck Flowers","David Andrews","Nate Solder","Ethan Pocic","Ted Karras","Samuel Cosmi","Nick Gates","Xavier Su'a-Filo","Dillon Radunz","Andre James","Connor Williams","Justin Britt","Rashod Hill","Bobby Massie","Mason Cole","James Daniels","Alex Cappa","Brandon Parker","Chukwuma Okorafor","Bradley Bozeman","Will Hernandez","Tyrell Crosby","Ike Boettger","Pat Elflein","Jonah Williams","Andrew Thomas","Josh Myers","Billy Price","Kelvin Beachum","Creed Humphrey","Isaiah Wynn","Tyler Shatley","Justin McCray","Lucas Patrick","Chris Lindstrom","Jalen Mayfield","Justin Murray","Brady Christensen","Nick Martin","Ty Nsekhe","Garrett Bradbury","Trenton Scott","Andre Dillard","Tytus Howard","Oday Aboushi","Wyatt Davis","Kendrick Green","Cornelius Lucas","Spencer Brown","Laurent Duvernay-Tardif","Jason Peters","Robert Hainsey","Jedrick Wills","Austin Corbett","Quinn Meinerz","Kyle Long","Ja'Wuan James","Ben Cleveland","James Hudson","Mekhi Becton","Drew Dalman","Kaleb McGary","Cameron Fleming","Dan Moore","Tristan Wirfs","Dennis Kelly","Aaron Stinnie","Austin Jackson","Richie Incognito","Jawaan Taylor","Greg Little","Cesar Ruiz","Cody Ford","Royce Newman","Dalton Risner","John Miller","Max Garcia","Elijah Wilkerson","Quinton Spain","Josh Wells","Josh Andrews","Julien Davenport","Chris Reed","Elgton Jenkins","Conor McDermott","Tom Compton","Erik McCoy","Tyler Larsen","Michael Schofield","Garett Bolles","Larry Borom","Jake Brendel","Brett Jones","Jason Spriggs","B.J. Finney","Jermaine Eluemunor","Austin Blythe","Jaylon Moore","Robert Hunt","Tommy Doyle","Max Scharping","Matt Skura","Evan Brown","Andrew Wylie","Scott Quessenberry","Geron Christian","Will Richardson","Joseph Noteboom","Matt Pryor","Brian Allen","Kyle Fuller","Josh Ball","Will Holden","Ezra Cleveland","Nick Allegretti","Trey Hill","Justin Skule","Coleman Shelton","Jamarco Jones","Nate Davis","David Quessenberry","Olisaemeka Udoh","Dennis Daley","Ryan Bates","Nate Herbig","Trey Pipkins","Ethan Greenidge","Daniel Brunskill","Calvin Anderson","Joshua Miles","Alex Bars","Fred Johnson","Isaiah Prince","Michael Deiter","Chuma Edoga","Yosuah Nijman","Colby Gossett","Ben Powers","Patrick Mekari","Bobby Evans","David Edwards","Damien Lewis","Josh Jones","Landon Young","Jonah Jackson","Stone Forsythe","Matt Hennessy","Lloyd Cushenberry","Matt Peart","Jordan Simmons","Trey Smith","Ben Bredeson","Logan Stenberg","Matt Nelson","Najee Toran","Nick Harris","Michael Dunn","Ben Bartch","Netane Muti","Storm Norton","Sam Mustipher","Lachavious Simmons","Solomon Kindley","Jon Runyan","John Simpson","Saahdiq Charles","Yodny Cajuste","Kevin Dotson","Michael Onwenu","Tyre Phillips","Justin Herron","Yasir Durant","J.C. Hassenauer","Connor McGovern","Tyler Biadasz","Danny Pinter","Terence Steele","Trystan Colon","Senio Kelemete","Matt Farniok","Charlie Heck","Jackson Barton","Sean Harlow","Deonte Brown","Will Fries","Jack Driscoll","Corey Levin","Wes Martin","Iosua Opeta","Robert Jones","Jake Curhan","Tremayne Anchrum","Alaric Jackson","Dakoda Shepley","Lucas Niang","Blake Hance","Calvin Throckmorton","Nick Leverett","Jake Hanson","Greg Mancz","Jordan Mills","Hakeem Adeniji","Jack Anderson","Michael Jordan","Korey Cunningham","Brandon Knight","Cole Toner","Sam Tecklenburg","Larnel Coleman","Aaron Brewer","Ryan McCollum","K.C. McDermott","Prince Teha Wanogho","Jamil Demby","Drew Forbes","Shane Lemieux","Sadarius Hutcherson","Blake Brandel","Mitch Hyatt","Kyle Murphy","Jimmy Morrissey","Cameron Clark","Parker Ferguson","Keith Ismael","Austin Schlottmann","Lane Taylor","Brandon Kemp","Kamaal Seymour","Cody Conway","Donell Stanley","Colton McKivitz","Le'Raven Clark","Phil Haynes","Benjamin Braden","Caleb Benenoch","Marcus Henry","Brett Toth","Tommy Kraemer","John Leglue","James Carpenter","Jamil Douglas","Jonotthan Harrison","Jon Toth","Alex Redmond","Dakota Dozier","Bobby Hart","David Sharpe","Rick Leonard","Rashaad Coward","Will Clapp","Dan Skipper","Ross Pierschbacher","Greg Senat","Keaton Sutherland"),
+cash=c(3221765,3170000,3164436,3151166,rep(3000000,5),2970588,
+             2838596,2825000,2770588,2621364,2500000,2433000,2423528,2377500,2275000,
+             rep(2183000,8),2133000,2100000,2097742,2080254,2078280,2077158,2075000,2067424,
+             2040260,2000000,1982352,1975000,1832160,1807644,1794115,1775108,1750000,1750000,1666170,1650000,1619599,
+             1606414,1600000,1572212,1566012,1550000,1536144,1527777,1525000,1515544,1505587,1505235,1500620,1500000,1490000,
+             1457779,1452416,1448457,1436720,1428250,1395000,1357904,1347638,1325000,1250000,1230016,1220000,1208038,1189448,
+             1186328,1177498,1159344,1144299,rep(1127500,8),1111602,1100000,1075000,1048690,1040000,1015274,
+             1000000,993080,rep(990000,6),983032,976625,975724,955736,935000,rep(920000,9),914344,868887,861691,
+             860000,852352,850173,rep(850000,24),832824,829970,829780,828035,826624,825662,821636,814518,802777,
+             790708,rep(780000,27),776386,762700,761111,755556,755552,750774,745375,723333,
+             715554,708333,708333,690000,688500,685556,680000,rep(660000,6),657500,656944,
+             628885,621936,613886,613332,566664,562221,549990,527136,515554,513333,476663,476658,
+             465000,465000,458888,445000,440004,rep(440000,4),439000,433333,424998,418054,
+             rep(415000,4),389997,350000,330554,330554,330000,329994,283332,256662,256662,
+             238888,204444,196000,183330,182000,179166,165000,110000,73332,55000,51111,rep(47222,4)))
+
+saltable2 <- rbind(saltable,others)
+
+# comparing the Spotrac list to OL in our list
+setdiff(ol_ids$displayName,saltable2$displayName)
+
+# changing names with discrepancies in Spotrac in order to match with our dataset
+saltable2[saltable2$displayName == "Chris Hubbard", "displayName"] <- "Christopher Hubbard"
+saltable2[saltable2$displayName == "Shaq Mason", "displayName"] <- "Shaquille Mason"
+saltable2[saltable2$displayName == "Orlando Brown Jr.", "displayName"] <- "Orlando Brown"
+
+# comparing lists again, seeing which players need salaries
+setdiff(ol_ids$displayName,saltable2$displayName)
+
+# adding salaries of other players
+others2 <- data.frame(displayName = c("Andre Smith","Brian Winters","James Ferentz","Cedric Ogbuehi","Ty Sambrailo","Austin Reiter","Joe Haeg","Elijah Wilkinson","Reginald McKenzie"),cash = c(354610,1212500,548221,1858822,871896,550000,2300000,1127500,284530))
+
+saltable3 <- rbind(saltable2,others2) %>% arrange(-cash)
+
+# players that are in our dataset that we have salary data for
+salplayers <- inner_join(saltable3,ol_ids,by="displayName") %>% arrange(-cash)
+
+# FINAL RESPONSE TABLE: removing the Connor McGoverns with incorrect salaries; corrects for warning from previous line
+salplayersfin <- salplayers %>% filter(!(nflId == "47873" & displayName == "Connor McGovern" & cash == 8000000)) %>% filter(!(nflId == "43433" & displayName == "Connor McGovern" & cash == 780000))
+```
+
+```{r Compiling Play-by-Play Data for each OL}
+
+# COMPLETE ALGORITHM THAT ITERATES OVER ALL PLAYS WITH ELIGIBLE LINEMAN-DEFENDER COMBOS
+
+# list of game and play ids
+playlist <- plays %>% dplyr::select(gameId,playId)
+
+# dataset where results are going to be stored
+ol_data <-  data.frame(nflId = integer(),displayName = character(),gameId = integer(),playId = integer(),dist_to_score = numeric(),half = numeric(), score_cats = character(),pff_beatenByDefender = integer(),pff_hitAllowed = integer(),pff_hurryAllowed = integer(),pff_sackAllowed = integer(),penalty = numeric(),o_median = numeric(), o_mean = numeric(),omax = numeric(),max_acc = numeric(),med_acc = numeric(),mean_acc = numeric(),max_spd = numeric(),med_spd = numeric(),mean_spd = numeric(),back_dist_max = numeric(),ol_tot_dist = numeric(),ol_med_dist = numeric(),ol_mean_dist = numeric(),op_ol_max = numeric(),op_ol_med = numeric(),op_ol_mean = numeric(),op_ol_xmax = numeric(),op_ol_xmin = numeric(),op_ol_xmed = numeric(),op_ol_xmean = numeric(),def_qb_min = numeric(),def_qb_max = numeric(),def_qb_med = numeric(),def_qb_mean = numeric(),def_qb_closemx = numeric(),ol_qb_min = numeric(),ol_qb_max = numeric(),ol_qb_med = numeric(),ol_qb_mean = numeric())
+
+
+## RUN THIS LOOP TO GET RESULTS
+
+for(gply in 1:nrow(playlist)){
+  
+  # filter by a single play
+  pffsample <- pffweeks_full %>% filter(gameId == playlist$gameId[gply],playId == playlist$playId[gply])
+  
+  # find OL that qualify as blockers on play
+  active_ol_ids <- pffsample %>% filter(general == "OL",pff_nflIdBlockedPlayer > 0) %>% distinct(nflId,displayName)
+  
+  # moving onto next play if no blockers are identified for O-linemen (where all blockedplayer id's are 0)
+  if(nrow(active_ol_ids) == 0){
+    next
+  }
+
+  # storage dataset of results from a given play for all OL involved
+active_ol <- data.frame(nflId = integer(10),displayName = character(10),gameId = integer(10),playId = integer(10),dist_to_score = numeric(10),half = numeric(10), score_cats = character(10),pff_beatenByDefender = integer(10),pff_hitAllowed = integer(10),pff_hurryAllowed = integer(10),pff_sackAllowed = integer(10),penalty = numeric(10),o_median = numeric(10), o_mean = numeric(10),omax = numeric(10),max_acc = numeric(10),med_acc = numeric(10),mean_acc = numeric(10),max_spd = numeric(10),med_spd = numeric(10),mean_spd = numeric(10),back_dist_max = numeric(10),ol_tot_dist = numeric(10),ol_med_dist = numeric(10),ol_mean_dist = numeric(10),op_ol_max = numeric(10),op_ol_med = numeric(10),op_ol_mean = numeric(10),op_ol_xmax = numeric(10),op_ol_xmin = numeric(10),op_ol_xmed = numeric(10),op_ol_xmean = numeric(10),def_qb_min = numeric(10),def_qb_max = numeric(10),def_qb_med = numeric(10),def_qb_mean = numeric(10),def_qb_closemx = numeric(10),ol_qb_min = numeric(10),ol_qb_max = numeric(10),ol_qb_med = numeric(10),ol_qb_mean = numeric(10))
+  
+# iterate by nflId throughout play
+for(i in 1:nrow(active_ol_ids)){
+  
+  # STEP 1: LOGISTICS ABOUT THE PLAYER AND GAME
+  # having a dataset of only the given O-lineman
+  playerdata <- pffsample %>% filter(nflId == active_ol_ids$nflId[i])
+  
+  # sanity check to make sure there is data for the blocked player; if not, we skip the given O-lineman and move on to the next
+  opp_player <- pffsample %>% filter(nflId == playerdata$pff_nflIdBlockedPlayer)
+  
+  if(nrow(opp_player) == 0){
+    next
+  }
+  
+  # identifying info about game, play, and player
+  active_ol$nflId[i] <- playerdata$nflId[1]
+  active_ol$displayName[i] <- playerdata$displayName[1]
+  active_ol$gameId[i] <- playerdata$gameId[1]
+  active_ol$playId[i] <- playerdata$playId[1]
+
+  
+  ### creating several metrics based on existing data
+  
+  #########################################################################
+  ## STEP 2: game / play situation variables
+  
+  # distance to end zone
+  active_ol$dist_to_score[i] <- playerdata$dist_to_score[1]
+  # half 1 or 2
+  active_ol$half[i] <- playerdata$half[1]
+  # one-score game or not
+  active_ol$score_cats[i] <- playerdata$score_cats[1]
+  # whether defender got by OL or not
+  active_ol$pff_beatenByDefender[i] <- playerdata$pff_beatenByDefender[1]
+  # whether hit was allowed
+  active_ol$pff_hitAllowed[i] <- playerdata$pff_hitAllowed[1]
+  # whether hurry was allowed
+  active_ol$pff_hurryAllowed[i] <- playerdata$pff_hurryAllowed[1]
+  # whether sack was allowed
+  active_ol$pff_sackAllowed[i] <- playerdata$pff_sackAllowed[1]
+  # binary penalty variable
+  active_ol$penalty[i] <- case_when(
+    playerdata$nflId[1] == playerdata$foulNFLId1[1] | playerdata$nflId[1] == playerdata$foulNFLId2[1] ~ 1,
+    playerdata$nflId[1] != playerdata$foulNFLId1[1] & playerdata$nflId[1] != playerdata$foulNFLId2[1] ~ 0
+  )
+  
+  #########################################################################
+  ## STEP 3: tracking / movement variables
+  
+  
+  ######### 3A. FOR THE OL HIMSELF
+  
+  
+  ####### OL ORIENTATION CHANGES
+  o_chgs <- numeric(nrow(playerdata)-1)
+  for(j in 2:nrow(playerdata)){
+    o_chgs[j-1] <- abs(playerdata$o[j] - playerdata$o[j-1])
+  }
+  
+  active_ol$o_median[i] <- median(o_chgs) # median change in orientation throughout a given play
+  active_ol$o_mean[i] <- mean(o_chgs) # mean change in orientation throughout a given play
+  active_ol$omax[i] <- max(o_chgs) # maximum change in orientation during a given play
+  
+  
+  ####### OL ACCELERATION STATS
+  
+  acc_stats <- playerdata$a
+  active_ol$max_acc[i] <- max(acc_stats) # max acceleration
+  active_ol$med_acc[i] <- median(acc_stats) # median acceleration
+  active_ol$mean_acc[i] <- mean(acc_stats) # mean acceleration
+  
+  ######## OL SPEED STATS
+  spd_stats <- playerdata$s
+  active_ol$max_spd[i] <- max(spd_stats) # max speed
+  active_ol$med_spd[i] <- median(spd_stats) # median speed
+  active_ol$mean_spd[i] <- mean(spd_stats) # mean speed
+  
+  
+  # keeping track of how far O-lineman traveled backward
+  ol_back <- numeric(nrow(playerdata)-1)
+  
+  for(t in 2:nrow(playerdata)){
+    ol_back[t-1] <- abs(playerdata$x[1] - playerdata$x[t])
+  }
+  
+  # distance traveled backwards by O-lineman
+  active_ol$back_dist_max[i] <- max(ol_back) # max distance traveled backwards
+
+  ############# Finding the distances traveled each frame for the offensive lineman, taking out non-zero entries
+  dist_trav <- numeric(nrow(playerdata))
+  
+  for(m in 1:(nrow(playerdata) - 1) ){
+    dist_trav[m] <- sqrt( (playerdata$x[m+1] - playerdata$x[m])^2 + (playerdata$y[m+1] - playerdata$y[m])^2 )
+  }
+  
+  dist_trav <- dist_trav[dist_trav != 0]
+  
+  active_ol$ol_tot_dist[i] <- sum(dist_trav) # total distance traveled by offensive lineman during play
+  active_ol$ol_med_dist[i] <- median(dist_trav) # median distance traveled by offensive lineman during play
+  active_ol$ol_mean_dist[i] <- mean(dist_trav) # mean distance traveled by offensive lineman during play
+  
+  
+  ############################# PROXIMITIES BETWEEN PLAYERS
+  
+  
+  ################ 3B. CREATING A DATASET OF TRACKING COORDINATES FOR THE DEFENSIVE PLAYER BEING BLOCKED
+  opp_player <- pffsample %>% filter(nflId == playerdata$pff_nflIdBlockedPlayer)
+  
+  # finding distances between Defender and Offensive lineman
+  opp_ol_dist <- numeric(nrow(playerdata)) # overall distance between players
+  opp_ol_xdist <- numeric(nrow(playerdata)) # x-coord dist between players
+  
+  for(ol in 1:nrow(playerdata)){
+    opp_ol_dist[ol] <- sqrt( (opp_player$x[ol] - playerdata$x[ol])^2 + (opp_player$y[ol] - playerdata$y[ol])^2 )
+
+    if(opp_player$x[1] > playerdata$x[1]){
+      opp_ol_xdist[ol] <- opp_player$x[ol] - playerdata$x[ol]
+    } else{
+      opp_ol_xdist[ol] <- playerdata$x[ol] - opp_player$x[ol]
+    }
+  }
+  
+  ####### DISTANCES BETWEEN DEFENDER AND OL
+  active_ol$op_ol_max[i] <- max(opp_ol_dist) # maximum distance
+  active_ol$op_ol_med[i] <- median(opp_ol_dist) # median distance
+  active_ol$op_ol_mean[i] <- mean(opp_ol_dist) # mean distance
+  
+  # x-distances (up-field distances)
+  active_ol$op_ol_xmax[i] <- max(opp_ol_xdist) # maximum distance
+  active_ol$op_ol_xmin[i] <- min(opp_ol_xdist) # minimum distance
+  active_ol$op_ol_xmed[i] <- median(opp_ol_xdist) # median distance
+  active_ol$op_ol_xmean[i] <- mean(opp_ol_xdist) # mean distance
+  
+  
+  
+  ################## 3C. CREATING A DATASET OF TRACKING COORDINATES FOR THE QUARTERBACK, PROXIMITY TO DEFENDER
+  qb_data <- pffsample %>% filter(pff_role == "Pass")
+  
+  # finding distances between Defender and QB
+  def_qb_dist <- numeric(nrow(playerdata))
+  
+  for(k in 1:nrow(playerdata)){
+    def_qb_dist[k] <- sqrt( (opp_player$x[k] - qb_data$x[k])^2 + (opp_player$y[k] - qb_data$y[k])^2 )
+  }
+  
+  # distances from Defender to QB
+  active_ol$def_qb_min[i] <- min(def_qb_dist) # minimum distance
+  active_ol$def_qb_max[i] <- max(def_qb_dist) # max distance
+  active_ol$def_qb_med[i] <- median(def_qb_dist) # median distance
+  active_ol$def_qb_mean[i] <- mean(def_qb_dist) # mean distance
+
+  
+  # finding "distance closed" by defender on path to QB
+  def_qb_close <- numeric(nrow(playerdata)-1)
+    
+  for(pl in 2:nrow(playerdata)){
+    def_qb_close[pl-1] <- (def_qb_dist[1] - def_qb_dist[pl]) / def_qb_dist[1]
+  }
+  
+  # "distance closed" by defender as a proportion of initial distance
+  active_ol$def_qb_closemx[i] <- max(def_qb_close) # maximum distance closed
+  
+  ################## 3D. DISTANCE BETWEEN THE QUARTERBACK AND OL
+  
+  ol_qb_dist <- numeric(nrow(playerdata))
+  
+  for(qb in 1:nrow(playerdata)){
+    ol_qb_dist[qb] <- sqrt( (playerdata$x[qb] - qb_data$x[qb])^2 + (playerdata$y[qb] - qb_data$y[qb])^2 )
+  }
+
+
+  # distances from QB to OL
+  active_ol$ol_qb_min[i] <- min(ol_qb_dist) # minimum distance
+  active_ol$ol_qb_max[i] <- max(ol_qb_dist) # max distance
+  active_ol$ol_qb_med[i] <- median(ol_qb_dist) # median distance
+  active_ol$ol_qb_mean[i] <- mean(ol_qb_dist) # mean distance
+  
+}
+  
+  ol_data <- rbind(ol_data,active_ol)
+  ol_data <- ol_data %>% filter(nflId > 0)
+  
+}
+
+# shows the plays that were run through the algorithm; cut off 2 of the initial 8108 plays, to give us 8106 plays with data
+# a total of 39579 player-play observations; will aggregate these results for each player
+ol_plays <- ol_data %>% dplyr::select(gameId,playId) %>% unique()
+
+# checking for plays with any NA's; no rows present
+nadf <- ol_data %>% filter_if(is.numeric, any_vars(is.na(.)))
+
+
+# find frequency of each player's number of plays
+ol_data <- ol_data %>% group_by(nflId,displayName) %>% mutate(player_count = n()) %>% filter(player_count >= 20)
+
+
+
+```
+
+
+Visuals
+
+```{r Field Viz Examples}
+library(ggfootball)
+library(ggplot2)
+
+# illustration of offensive line positions
+
+ggfootball(left_endzone = "#003B5C", right_endzone = "#FFB81C") + 
+  geom_point(cex=4,col="#003B5C",data = data.frame(x = c(rep(35,5),42), y = c(21,24,27,30,33,27)),
+    aes(x = x, y = y)) +
+  geom_vline(xintercept=35,col="#FFB81C",lwd=1.1) + 
+  annotate(geom="text", x=60, y=10, label="Play Direction Left",color="#FFB81C",fontface=2) +
+  annotate(geom="text", x=50, y=45, label="Line of Scrimmage",color="#FFB81C",fontface=2) +
+  annotate(geom="text", x=32, y=21, label="LT",color="#003B5C",fontface=2,size=3) + 
+  annotate(geom="text", x=32, y=24, label="LG",color="#003B5C",fontface=2,size=3) + 
+  annotate(geom="text", x=32, y=27, label="C",color="#003B5C",fontface=2,size=3) + 
+  annotate(geom="text", x=32, y=30, label="RG",color="#003B5C",fontface=2,size=3) + 
+  annotate(geom="text", x=32, y=33, label="RT",color="#003B5C",fontface=2,size=3) + 
+  annotate(geom="text", x=42, y=29, label="QB",color="#003B5C",fontface=2,size=3)
+
+
+
+# illustration of the red zone
+
+ggfootball(left_endzone = "#003B5C", right_endzone = "#FFB81C") + 
+  geom_vline(xintercept=20,col="red",lwd=35,alpha=0.5) + 
+  geom_vline(xintercept=100,col="red",lwd=35,alpha=0.5)
+
+
+# illustration of backward distance traveled by a lineman of a given play
+
+ggfootball(left_endzone = "#003B5C", right_endzone = "#FFB81C") + 
+  geom_point(cex=4,col="darkred",data = data.frame(x = c(playerdata$x[1],min(playerdata$x)), y = rep(27,2)),
+    aes(x = x, y = y)) + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  annotate(geom="text", x=min(playerdata$x)-6, y=playerdata$y[1]+0.1, label="Max Diff",color="#003B5C",fontface=2,size=2.9) + 
+  annotate(geom="text", x=playerdata$x[1]+5, y=playerdata$y[1]+0.1, label="Start",color="#003B5C",fontface=2) + 
+  annotate(geom="text", x=playerdata$x[1]+15, y=10, label="Line of Scrimmage",color="#FFB81C",fontface=2) +
+  annotate(geom="text", x=60, y=45, label="Play Direction Left to Right",color="#FFB81C",fontface=2) +
+  geom_vline(xintercept=playerdata$x[1],col="#FFB81C",lwd=1.1)
+
+
+# ol dl x-coordinate difference by play direction
+
+ggfootball(left_endzone = "#003B5C", right_endzone = "#FFB81C") + 
+  geom_point(cex=4,col=c("darkred","#003B5C","#003B5C","darkred"),data = data.frame(x = c(35,40,80,85), y = rep(27,4)),
+    aes(x = x, y = y)) + 
+  geom_vline(xintercept=40,col="#FFB81C",lwd=1.1) + 
+  geom_vline(xintercept=80,col="#FFB81C",lwd=1.1) +
+  annotate(geom="text", x=95, y=10, label="Play Direction Right",color="#FFB81C",fontface=2) +
+  annotate(geom="text", x=25, y=10, label="Play Direction Left",color="#FFB81C",fontface=2) + 
+    annotate(geom="text", x=25, y=45, label="Play 1",color="darkred",fontface=2,size=5) + 
+  annotate(geom="text", x=95, y=45, label="Play 2",color="darkred",fontface=2,size=5) + 
+  annotate(geom="text", x=43, y=29, label="OL",color="#003B5C",fontface=2) + 
+  annotate(geom="text", x=77, y=29, label="OL",color="#003B5C",fontface=2) + 
+  annotate(geom="text", x=33, y=29, label="DEF",color="darkred",fontface=2) + 
+  annotate(geom="text", x=87, y=29, label="DEF",color="darkred",fontface=2) 
+
+
+# dl qb distance
+
+ggfootball(left_endzone = "#003B5C", right_endzone = "#FFB81C") + 
+  geom_point(cex=4,col=c("darkred","#003B5C","#003B5C"),data = data.frame(x = c(35,40,46), y = rep(27,3)),
+    aes(x = x, y = y)) + 
+  geom_vline(xintercept=40,col="#FFB81C",lwd=1.1) + 
+  annotate(geom="text", x=25, y=10, label="Play Direction Left",color="#FFB81C",fontface=2) +
+  annotate(geom="text", x=40, y=29, label="OL",color="#003B5C",fontface=2) + 
+  annotate(geom="text", x=34, y=29, label="DEF",color="darkred",fontface=2) + 
+  annotate(geom="text", x=46, y=29, label="QB",color="#003B5C",fontface=2)
+
+
+# dl qb distance closed
+
+ggfootball(left_endzone = "#003B5C", right_endzone = "#FFB81C") + 
+  geom_point(cex=4,col=c("darkred","darkred","#003B5C"),data = data.frame(x = c(35,40,46), y = rep(27,3)),
+    aes(x = x, y = y)) +
+  annotate(geom="text", x=40, y=10, label="Play Direction Left",color="#FFB81C",fontface=2) +
+  annotate(geom="text", x=35, y=29, label="DEF",color="darkred",fontface=2,size=3) + 
+  annotate(geom="text", x=40, y=25, label="DEF2",color="darkred",fontface=2,size=3) + 
+  annotate(geom="text", x=46, y=29, label="QB1/2",color="#003B5C",fontface=2,size=3)
+
+
+# ol qb distance 
+
+ggfootball(left_endzone = "#003B5C", right_endzone = "#FFB81C") + 
+  geom_point(cex=4,col="#003B5C",data = data.frame(x = c(35,39,46), y = rep(27,3)),
+    aes(x = x, y = y)) +
+  geom_vline(xintercept=35,col="#FFB81C",lwd=1.1) + 
+  annotate(geom="text", x=60, y=10, label="Play Direction Left",color="#FFB81C",fontface=2) +
+  annotate(geom="text", x=50, y=45, label="Line of Scrimmage",color="#FFB81C",fontface=2) +
+  annotate(geom="text", x=33, y=29, label="OL",color="#003B5C",fontface=2,size=3) + 
+  annotate(geom="text", x=39, y=29, label="OL2",color="#003B5C",fontface=2,size=3) + 
+  annotate(geom="text", x=46, y=29, label="QB1/2",color="#003B5C",fontface=2,size=3)
+
+```
+
+```{r EDA}
+
+library(ggplot2)
+library(corrplot)
+library(caret) # for createDataPartition, allows for split of data into training and test sets
+
+summary(ol_data)
+################ UNWEIGHTED SUMMARY TABLE
+
+# numeric columns of interest that need to be aggregated; 35 of them
+col_index <- names(ol_data)[8:42]
+# getting aggregated stats for unweighted summary table
+unweight <- ol_data %>% group_by(nflId,displayName) %>% summarize(across(all_of(col_index), mean))
+# join with salary table by nflId
+unweight_final <- inner_join(unweight,salplayersfin[,-1],by="nflId") %>% mutate(cash = cash / 1000000)
+
+# filter data to get data set with numbers only; can see how numeric variables correlate to the response variable: salary 
+unwt_nums <- unweight_final[,-c(1:2)]
+summary(unwt_nums)
+cors_full <- cor(unwt_nums)
+cors_sal <- cors_full[,36] # the column that corresponds to correlations with salary (the response variable)
+topvars <- names(tail(sort(abs(cors_sal)),15)) # top magnitude correlations with salary
+# correlation plot of greatest magnitude correlations to salary
+cors_top <- cors_full[topvars,topvars]
+corrplot(cors_top,title="Top Correlated Variables with Salary",mar = c(0,0,2,0),col = colorRampPalette(c("#FFB81C", "white", "#003B5C"))(100))
+
+
+###### distribution of response
+ggplot(data=unweight_final,aes(x=cash)) + 
+  geom_histogram(color="#003B5C",fill="#FFB81C",bins=25) + ggtitle("Distribution of 2021 NFL Salaries, Offensive Linemen") + xlab("Salary (in millions of US Dollars)") + ylab("Number of Players")
+summary(unweight_final$cash)
+quantile(unweight_final$cash)
+ggsave("salaryhist.png")
+
+
+##### distribution of highly correlated predictors
+
+# player snap counts
+ggplot(data=unweight_final,aes(x=player_count)) + 
+  geom_histogram(color="#003B5C",fill="#FFB81C",bins=25) + ggtitle("Distribution of Snap Counts, NFL Offensive Linemen") + xlab("Snaps Played") + ylab("Number of Players")
+quantile(unweight_final$player_count)
+ggsave("snaps.png")
+
+# median distance between def and QB
+ggplot(data=unweight_final,aes(x=def_qb_med)) + 
+  geom_histogram(color="#FFB81C",fill="#003B5C",bins=25) + ggtitle("Median Distances between Defender and Quarterback during Plays") + xlab("Median Distance (in Yards)") + ylab("Number of Players")
+summary(unweight_final$def_qb_med)
+
+ggsave("defqbmed.png")
+
+# average max acceleration across all plays for a lineman
+ggplot(data=unweight_final,aes(x=max_acc)) + 
+  geom_histogram(color="#FFB81C",fill="#003B5C",bins=25) + ggtitle("Maximum Acceleration of Lineman across Plays") + xlab("Max Acceleration (yards per second squared)") + ylab("Number of Players")
+summary(unweight_final$max_acc)
+quantile(unweight_final$max_acc)
+ggsave("maxacc.png")
+
+
+
+###### distribution of weighting variables
+# frequencies of red-zone snaps across all plays
+rz_freq <- data.frame(table(ol_data$dist_to_score))
+
+ggplot(rz_freq, aes(x = Var1, y = Freq)) +
+  geom_bar(stat = "identity", color = "#FFB81C",fill = "#003B5C", width = 0.5) +
+  labs(x = "Red-Zone Status", y = "Number of Plays", title = "Frequency of Red Zone Plays")
+
+5402/(33903+5402) # proportion of red-zone plays; 0.138
+ggsave("redzone.png")
+
+# frequencies of score categories across all plays
+score_freq <- data.frame(table(ol_data$score_cats))
+
+ggplot(score_freq, aes(x = Var1, y = Freq)) +
+  geom_bar(stat = "identity", color = "#FFB81C", fill = "#003B5C", width = 0.5) +
+  labs(x = "Game Score Scenario", y = "Number of Plays", title = "Frequency of Score Intervals")
+
+24456/(24456+14849) # proportion of plays where game was within 1 score; 0.622
+
+ggsave("scorecat.png")
+
+
+
+```
+
+
+Models
+
+```{r Unweighted Full Model}
+library(car)
+#splitting data into test and train sets based on a 75%-25% ratio
+set.seed(904138)
+sample1 <- createDataPartition(unweight_final$cash, p = 0.75,list=FALSE)
+
+trainset <- unweight_final[sample1, ]
+testset <- unweight_final[-sample1, ]
+
+# standardizing predictors (excluding player id, player name, and salary)
+trainset[,-c(1,2,38)] <- scale(trainset[,-c(1,2,38)])
+testset[,-c(1,2,38)] <- scale(testset[,-c(1,2,38)])
+
+# establishing the full model (minus player id and player name)
+uw_fullmod <- lm(cash ~ . - nflId - displayName,data=trainset)
+summary(uw_fullmod)
+```
+
+
+```{r MODEL 1: Unweighted Stepwise Model}
+#splitting data into test and train sets based on a 75%-25% ratio
+set.seed(904138)
+sample1 <- createDataPartition(unweight_final$cash, p = 0.75,list=FALSE)
+
+trainset <- unweight_final[sample1, ]
+testset <- unweight_final[-sample1, ]
+
+# standardizing predictors (excluding player id, player name, and salary)
+trainset[,-c(1,2,38)] <- scale(trainset[,-c(1,2,38)])
+testset[,-c(1,2,38)] <- scale(testset[,-c(1,2,38)])
+
+# establishing the full model (minus player id and player name)
+uw_fullmod <- lm(cash ~ . - nflId - displayName,data=trainset)
+
+# using the step function going both directions with adjusted R-squared as a criterion to determine best variables
+uw_step <- step(uw_fullmod, direction = "both", k = log(nrow(trainset)), trace = 0)
+summary(uw_step)
+vif(uw_step)
+
+# NEW Unweighted Stepwise Model: removed other two ol-qb proximity variables to reduce collinearity
+uw_step2 <- lm(cash ~ pff_beatenByDefender + mean_acc + ol_mean_dist + def_qb_mean + ol_qb_med + player_count,data=trainset)
+summary(uw_step2)
+vif(uw_step2)
+uw_predictors <- names(coef(uw_step2))[-1] # variables we chose
+plot(uw_step2)
+
+
+# Getting variable means and sd's to un-standardize predictors and get true coefficients
+trainset_num <- unweight_final[sample1,-c(1,2,38)]
+uwpred_means <- colMeans(trainset_num[,uw_predictors]) # finding initial predictor means
+uwpred_sds <- apply(trainset_num[, uw_predictors], 2, sd) # finding initial predictor standard deviations
+
+# Un-standardizing the coefficients
+uwpred_ustd <- coef(uw_step2)[-1] * uwpred_sds
+uwint_ustd <- coef(uw_step2)[1] + sum(uwpred_means * uwpred_ustd)
+uw_truecoefs <- c(uwint_ustd,uwpred_ustd)
+uw_truecoefs
+
+```
+
+
+```{r MODEL 2: Weighted Model}
+# weighting variables
+
+# frequency table
+table(ol_data$dist_to_score,ol_data$score_cats)
+
+# numeric columns of interest that need to be weighted; 34 of them (we don't include player snap counts)
+col_index <- names(ol_data)[8:41]
+
+# getting aggregated stats for weighted summary table
+weightdf <- ol_data %>% group_by(nflId,displayName,player_count) %>% 
+  summarize(across(all_of(col_index), ~weighted.mean(., w = ifelse(dist_to_score == "RZ", 0.75, 0.25) * ifelse(score_cats == "1 score", 0.6, 0.4))))
+
+
+# join with salary table by nflId
+weightdf_final <- inner_join(weightdf,salplayersfin[,-1],by="nflId") %>% mutate(cash = cash / 1000000)
+
+
+
+#splitting data into test and train sets based on a 75%-25% ratio
+set.seed(904138)
+sample2 <- createDataPartition(weightdf_final$cash, p = 0.75,list=FALSE)
+
+trainset2 <- weightdf_final[sample2, ]
+testset2 <- weightdf_final[-sample2, ]
+
+# standardizing predictors (excluding player id, player name, and salary)
+trainset2[,-c(1,2,38)] <- scale(trainset2[,-c(1,2,38)])
+testset2[,-c(1,2,38)] <- scale(testset2[,-c(1,2,38)])
+
+# establishing the full weighted model (minus player id and player name)
+w_fullmod <- lm(cash ~ . - nflId - displayName,data=trainset2)
+
+# using the step function going both directions with adjusted R-squared as a criterion to determine best variables
+w_step <- step(w_fullmod, direction = "both", k = log(nrow(trainset2)), trace = 0)
+summary(w_step)
+vif(w_step)
+
+# NEW Unweighted Stepwise Model: removed other two ol-qb proximity variables to reduce collinearity
+w_step2 <- lm(cash ~ pff_beatenByDefender + mean_acc + ol_mean_dist + def_qb_mean + ol_qb_med + player_count,data=trainset2)
+summary(w_step2)
+vif(w_step2)
+w_predictors <- names(coef(w_step2))[-1] # variables we chose
+plot(w_step2)
+
+
+# Getting variable means and sd's to un-standardize predictors and get true coefficients
+trainset2_num <- weightdf_final[sample2,-c(1,2,38)]
+wpred_means <- colMeans(trainset2_num[,w_predictors]) # finding initial predictor means
+wpred_sds <- apply(trainset2_num[, w_predictors], 2, sd) # finding initial predictor standard deviations
+
+# Un-standardizing the coefficients
+wpred_ustd <- coef(w_step2)[-1] * wpred_sds
+wint_ustd <- coef(w_step2)[1] + sum(wpred_means * wpred_ustd)
+w_truecoefs <- c(wint_ustd,wpred_ustd)
+w_truecoefs
+
+```
+
+
+```{r MODEL 3: Weighted Transformed Model}
+library(MASS)
+set.seed(904138)
+# NEW Unweighted Stepwise Model from last step: removed other two ol-qb proximity variables to reduce collinearity
+w_step2 <- lm(cash ~ pff_beatenByDefender + mean_acc + ol_mean_dist + def_qb_mean + ol_qb_med + player_count,data=trainset2)
+summary(w_step2)
+w_predictors <- names(coef(w_step2))[-1] # variables we chose
+plot(w_step2)
+
+
+# Specify the response variable name
+response_var <- "cash"
+
+# Specify the predictor variable names
+predictor_vars <- c(w_predictors,"cash")
+
+# Initialize an empty list to store the lambda values
+lambda_values <- list()
+
+# Iterate over the predictor variables
+for (var in predictor_vars) {
+  # Create the formula for the model (response ~ predictor)
+  formula <- as.formula(paste(response_var, "~", var))
+  
+  # Subset the data to include only the response and current predictor
+  subset_data <- subset(trainset2, select = c(response_var, var))
+  
+  # Perform Box-Cox transformation for the current predictor
+  transformed_data <- boxcox(formula, data = subset_data)
+  
+  # Extract the lambda value for the current predictor
+  lambda_value <- transformed_data$x[which.max(transformed_data$y)]
+  
+  # Store the lambda value in the list
+  lambda_values[[var]] <- lambda_value
+}
+
+# Print the lambda values for each predictor
+for (var in predictor_vars) {
+  print(paste("Lambda value for", var, ":", lambda_values[[var]]))
+}
+
+
+# Using the transformations in the new model; only the response since others are too small
+logmod1 <- lm(log(cash) ~ pff_beatenByDefender + mean_acc + ol_mean_dist + def_qb_mean + ol_qb_med + player_count,data=trainset2)
+summary(logmod1)
+plot(logmod1)
+
+# predictions on the log scale
+test_res <- predict(logmod1,newdata=testset2)
+
+# re-transforming the predictions back to regular scale
+test_preds <- exp(test_res)
+
+# the actual salary values
+test_sals <- testset2$cash
+
+
+# getting RMSE for log model
+log_rmse <- RMSE(test_preds,test_sals)
+
+# looking for trend in errors
+badres <- test_preds - test_sals
+
+sort(badres)
+```
+
+
+```{r MODEL 4: Random Forest}
+library(randomForest)
+
+# go to unstandardized data that is weighted
+# numeric columns of interest that need to be weighted; 34 of them (we don't include player snap counts)
+col_index <- names(ol_data)[8:41]
+
+# getting aggregated stats for weighted summary table
+weightdf <- ol_data %>% group_by(nflId,displayName,player_count) %>% 
+  summarize(across(all_of(col_index), ~weighted.mean(., w = ifelse(dist_to_score == "RZ", 0.75, 0.25) * ifelse(score_cats == "1 score", 0.6, 0.4))))
+
+# join with salary table by nflId
+weightdf_final <- inner_join(weightdf,salplayersfin[,-1],by="nflId") %>% mutate(cash = cash / 1000000)
+
+
+
+#splitting data into test and train sets based on a 75%-25% ratio
+set.seed(904138)
+sample3 <- createDataPartition(weightdf_final$cash, p = 0.75,list=FALSE)
+
+trainset3 <- weightdf_final[sample3, ]
+testset3 <- weightdf_final[-sample3, ]
+
+
+# Define a vector of ntree values
+ntree_values <- c(50,75,100,125,150)
+
+# Create an empty list to store the model results
+model_results <- list()
+
+# Iterate over each ntree value
+for (ntree in ntree_values) {
+  set.seed(904138)
+  # Create the random forest model
+  model <- randomForest(cash ~ .-nflId-displayName, data = trainset3, ntree = ntree)
+  
+  # Store the model in the results list
+  model_results[[as.character(ntree)]] <- model
+}
+
+model_results
+
+
+
+# predictions on test data
+
+# Create an empty vector to store RMSE values
+rmse_values <- vector("numeric", length = length(ntree_values))
+
+# Iterate over each ntree value
+for (i in seq_along(ntree_values)) {
+  set.seed(904138)
+  ntree <- ntree_values[i]
+  
+  # Get the model for a specific ntree value
+  model <- model_results[[as.character(ntree)]]
+  
+  # Make predictions on the test set
+  predictions <- predict(model, newdata = testset3)
+  
+  # Calculate RMSE
+  rmse <- sqrt(mean((predictions - testset3$cash)^2))
+  
+  # Store the RMSE value in the vector
+  rmse_values[i] <- rmse
+}
+
+# Print the RMSE values for each ntree
+for (i in seq_along(ntree_values)) {
+  ntree <- ntree_values[i]
+  rmse <- rmse_values[i]
+  print(paste("RMSE for ntree =", ntree, ":", rmse))
+}
+
+set.seed(904138)
+
+model75 <- randomForest(cash ~ .-nflId-displayName, data = trainset3, ntree = 75)
+
+# Make predictions on the test set
+predictions75 <- predict(model75, newdata = testset3)
+  
+# Variable Importance Plot
+varImp(model75)
+
+
+varImpPlot(model75, main = "Variable Importance Plot, 75-Tree Model")
+
+ggsave("varimp.png")
+```
+
+
+
+
+
+
+
+
+
