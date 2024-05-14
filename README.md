@@ -3,7 +3,7 @@ Thesis on Analyzing Offensive Line Play with Tracking Data
 
 Full thesis can be found here: https://www.proquest.com/docview/2828117780
 
-This thesis is going to evaluate offensive line play that will emphasize an offensive lineman's physical dominance, measured through speed, agility, power, and other variables.
+This thesis evaluates offensive line play that analyzes an offensive lineman's physical dominance, measured through speed, agility, power, and other variables.
 
 Here are the steps I have taken to accomplish this:
 
@@ -21,4 +21,4 @@ Here are the steps I have taken to accomplish this:
 
 7. Determine if any transformations/adjustments should be made to variable aggregation based on the model's performance on training and test sets of the data, and change the model accordingly. 
 
-8. Find an appropriate model that roughly approximates salary.
+8. Test various model structures and compare them to see which one best approximates salary.
